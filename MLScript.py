@@ -15,7 +15,7 @@ from sklearn.metrics import (
 )
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.impute import SimpleImputer  # <-- NEW
+from sklearn.impute import SimpleImputer 
 
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -23,7 +23,26 @@ import seaborn as sns
 RANDOM_STATE = 42
 print("[INFO] Imports done.")
 
-# Load Data from SQLite
+# IF DATASET NOT DOWNLOADED USE THIS CODE:
+
+# Also Install dependencies as needed:
+# pip install kagglehub[pandas-datasets]
+
+'''
+import kagglehub
+from kagglehub import KaggleDatasetAdapter
+
+# Set the path to the file you'd like to load
+file_path = "" #Insert workspace path
+
+df = kagglehub.load_dataset(
+  KaggleDatasetAdapter.PANDAS,
+  "hugomathien/soccer",
+  file_path,
+)
+'''
+
+# 1. Load Data from SQLite
 
 print("[INFO] Connecting to SQLite database...")
 conn = sqlite3.connect("database.sqlite")  # adjust path if needed
@@ -45,3 +64,149 @@ print(f"[SHAPE] matches: {matches.shape}")
 print(f"[SHAPE] teams: {teams.shape}")
 print(f"[SHAPE] team_attr: {team_attr.shape}")
 print(f"[SHAPE] player_attr: {player_attr.shape}")
+
+# 2. Helper Functions
+
+def latest_team_attributes(team_attr_df):
+    """
+    Keep the latest team attributes per team & season (date).
+    """
+    df = team_attr_df.copy()
+    df["date"] = pd.to_datetime(df["date"])
+    df.sort_values(["team_api_id", "date"], inplace=True)
+    latest = df.groupby("team_api_id").tail(1)
+    return latest
+
+def latest_player_attributes(player_attr_df):
+    """
+    Keep the latest attributes per player.
+    """
+    df = player_attr_df.copy()
+    df["date"] = pd.to_datetime(df["date"])
+    df.sort_values(["player_api_id", "date"], inplace=True)
+    latest = df.groupby("player_api_id").tail(1)
+    return latest
+
+print("[INFO] Computing latest team and player attributes...")
+team_attr_latest = latest_team_attributes(team_attr)
+player_attr_latest = latest_player_attributes(player_attr)
+print(f"[SHAPE] team_attr_latest: {team_attr_latest.shape}")
+print(f"[SHAPE] player_attr_latest: {player_attr_latest.shape}")
+
+print("[INFO] Encoding target variable (result)...")
+
+# 3.1 Build match‑level features
+
+def encode_result(row):
+    if row["home_team_goal"] > row["away_team_goal"]:
+        return 2  # Home win
+    elif row["home_team_goal"] < row["away_team_goal"]:
+        return 0  # Away win
+    else:
+        return 1  # Draw
+
+matches["result"] = matches.apply(encode_result, axis=1)
+print("[INFO] Result column added. Value counts:")
+print(matches["result"].value_counts())
+
+# 3.2 Map team attributes to matches (home & away)
+
+print("[INFO] Merging team attributes into matches...")
+team_attr_cols = [
+    "buildUpPlaySpeed", "buildUpPlayPassing", "chanceCreationPassing",
+    "chanceCreationCrossing", "chanceCreationShooting",
+    "defencePressure", "defenceAggression", "defenceTeamWidth"
+]
+
+team_attr_latest_small = team_attr_latest[["team_api_id"] + team_attr_cols].drop_duplicates("team_api_id")
+print(f"[SHAPE] team_attr_latest_small: {team_attr_latest_small.shape}")
+
+matches = matches.merge(
+    team_attr_latest_small.add_prefix("home_team_"),
+    left_on="home_team_api_id",
+    right_on="home_team_team_api_id",
+    how="left"
+)
+matches = matches.merge(
+    team_attr_latest_small.add_prefix("away_team_"),
+    left_on="away_team_api_id",
+    right_on="away_team_team_api_id",
+    how="left"
+)
+
+matches.drop(columns=[c for c in matches.columns if c.endswith("_team_api_id")], inplace=True)
+print(f"[INFO] After merging team attributes, matches shape: {matches.shape}")
+
+# 3.3 Aggregate player ratings
+
+print("[INFO] Computing lineup stats (average ratings)...")
+player_basic_cols = ["player_api_id", "overall_rating", "stamina", "reactions"]
+player_attr_small = player_attr_latest[player_basic_cols]
+print(f"[SHAPE] player_attr_small: {player_attr_small.shape}")
+
+def compute_lineup_stats(row, side_prefix):
+    player_ids = [row[f"{side_prefix}_player_{i}"] for i in range(1, 12)]
+    sub = player_attr_small[player_attr_small["player_api_id"].isin(player_ids)]
+    if sub.empty:
+        return pd.Series({
+            f"{side_prefix}_avg_overall": np.nan,
+            f"{side_prefix}_avg_stamina": np.nan,
+            f"{side_prefix}_avg_reactions": np.nan,
+        })
+    return pd.Series({
+        f"{side_prefix}_avg_overall": sub["overall_rating"].mean(),
+        f"{side_prefix}_avg_stamina": sub["stamina"].mean(),
+        f"{side_prefix}_avg_reactions": sub["reactions"].mean(),
+    })
+
+for side in ["home", "away"]:
+    print(f"[INFO] Computing lineup stats for {side} side...")
+    stats = matches.apply(compute_lineup_stats, axis=1, side_prefix=side)
+    matches = pd.concat([matches, stats], axis=1)
+
+print("[INFO] Lineup stats added.")
+print(matches[[c for c in matches.columns if "avg_overall" in c]].head())
+
+# 3.4 Bookmaker odds & implied probabilities
+
+print("[INFO] Processing bookmaker odds...")
+book_cols = ["B365H", "B365D", "B365A"]
+matches[book_cols] = matches[book_cols].astype(float)
+
+for col in book_cols:
+    null_before = matches[col].isna().sum()
+    matches[col] = matches[col].fillna(matches[col].median())
+    null_after = matches[col].isna().sum()
+    print(f"[IMPUTE] {col}: {null_before} -> {null_after} NaNs")
+
+def implied_probabilities(row):
+    odds = np.array([row["B365H"], row["B365D"], row["B365A"]], dtype=float)
+    inv = 1.0 / odds
+    s = inv.sum()
+    if s == 0:
+        return pd.Series({
+            "prob_home": np.nan,
+            "prob_draw": np.nan,
+            "prob_away": np.nan
+        })
+    return pd.Series({
+        "prob_home": inv[0] / s,
+        "prob_draw": inv[1] / s,
+        "prob_away": inv[2] / s
+    })
+
+print("[INFO] Computing implied probabilities from odds...")
+prob_df = matches.apply(implied_probabilities, axis=1)
+matches = pd.concat([matches, prob_df], axis=1)
+print(matches[["prob_home", "prob_draw", "prob_away"]].head())
+
+# 3.5 Home/away context & meta info
+
+print("[INFO] Adding home_advantage, season, league_name...")
+matches["home_advantage"] = 1
+matches["season"] = matches["season"].astype(str)
+matches = matches.merge(leagues[["id", "name"]], left_on="league_id", right_on="id", how="left")
+matches.rename(columns={"name": "league_name"}, inplace=True)
+matches.drop(columns=["id_y"], inplace=True, errors="ignore")
+print(f"[INFO] Final matches shape after feature engineering: {matches.shape}")
+print(matches[["league_name", "season", "home_advantage"]].head())
