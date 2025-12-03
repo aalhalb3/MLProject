@@ -1,3 +1,4 @@
+# Imports 
 import sqlite3
 import numpy as np
 import pandas as pd
@@ -15,13 +16,11 @@ from sklearn.metrics import (
 )
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.impute import SimpleImputer 
 
 import matplotlib.pyplot as plt
 import seaborn as sns
 
 RANDOM_STATE = 42
-print("[INFO] Imports done.")
 
 # IF DATASET NOT DOWNLOADED USE THIS CODE:
 
@@ -39,23 +38,23 @@ df = kagglehub.load_dataset(
   KaggleDatasetAdapter.PANDAS,
   "hugomathien/soccer",
   file_path,
-)
-'''
+)'''
 
-# 1. Load Data from SQLite
+# Load data from SQLite Database
+
 
 print("[INFO] Connecting to SQLite database...")
 conn = sqlite3.connect("database.sqlite")  # adjust path if needed
 print("[INFO] Connection opened.")
 
 print("[INFO] Loading tables...")
-matches     = pd.read_sql_query("SELECT * FROM Match", conn)
-teams       = pd.read_sql_query("SELECT * FROM Team", conn)
-team_attr   = pd.read_sql_query("SELECT * FROM Team_Attributes", conn)
-players     = pd.read_sql_query("SELECT * FROM Player", conn)
+matches   = pd.read_sql_query("SELECT * FROM Match", conn)
+teams     = pd.read_sql_query("SELECT * FROM Team", conn)
+team_attr = pd.read_sql_query("SELECT * FROM Team_Attributes", conn)
+players   = pd.read_sql_query("SELECT * FROM Player", conn)
 player_attr = pd.read_sql_query("SELECT * FROM Player_Attributes", conn)
-leagues     = pd.read_sql_query("SELECT * FROM League", conn)
-countries   = pd.read_sql_query("SELECT * FROM Country", conn)
+leagues   = pd.read_sql_query("SELECT * FROM League", conn)
+countries = pd.read_sql_query("SELECT * FROM Country", conn)
 
 conn.close()
 print("[INFO] Connection closed.")
@@ -65,7 +64,7 @@ print(f"[SHAPE] teams: {teams.shape}")
 print(f"[SHAPE] team_attr: {team_attr.shape}")
 print(f"[SHAPE] player_attr: {player_attr.shape}")
 
-# 2. Helper Functions
+# 2. Helper functions
 
 def latest_team_attributes(team_attr_df):
     """
@@ -210,3 +209,96 @@ matches.rename(columns={"name": "league_name"}, inplace=True)
 matches.drop(columns=["id_y"], inplace=True, errors="ignore")
 print(f"[INFO] Final matches shape after feature engineering: {matches.shape}")
 print(matches[["league_name", "season", "home_advantage"]].head())
+
+
+# 4. Handle missing data & final feature set
+
+essential_cols = [
+    "home_team_goal", "away_team_goal",
+    "home_avg_overall", "away_avg_overall",
+    "prob_home", "prob_draw", "prob_away"
+]
+matches_clean = matches.dropna(subset=essential_cols)
+print("[INFO] matches_clean shape:", matches_clean.shape)
+
+numeric_features = [
+    "home_avg_overall", "home_avg_stamina", "home_avg_reactions",
+    "away_avg_overall", "away_avg_stamina", "away_avg_reactions",
+    "prob_home", "prob_draw", "prob_away",
+    "home_team_buildUpPlaySpeed", "home_team_buildUpPlayPassing",
+    "home_team_chanceCreationPassing", "home_team_chanceCreationCrossing",
+    "home_team_chanceCreationShooting",
+    "home_team_defencePressure", "home_team_defenceAggression",
+    "home_team_defenceTeamWidth",
+    "away_team_buildUpPlaySpeed", "away_team_buildUpPlayPassing",
+    "away_team_chanceCreationPassing", "away_team_chanceCreationCrossing",
+    "away_team_chanceCreationShooting",
+    "away_team_defencePressure", "away_team_defenceAggression",
+    "away_team_defenceTeamWidth"
+]
+
+categorical_features = ["league_name", "season"]
+
+X = matches_clean[numeric_features + categorical_features]
+y = matches_clean["result"].astype(int)
+
+print("[INFO] NaNs per numeric feature BEFORE split:")
+print(X[numeric_features].isna().sum().sort_values(ascending=False).head(10))
+
+# 5. Train/test split
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, stratify=y, random_state=RANDOM_STATE
+)
+print("[INFO] Train shape:", X_train.shape, "Test shape:", X_test.shape)
+
+# 6. Preprocessing pipeline
+
+numeric_transformer = Pipeline(
+    steps=[
+        ("imputer", SimpleImputer(strategy="median")),  
+        ("scaler", StandardScaler())
+    ]
+)
+
+categorical_transformer = Pipeline(
+    steps=[
+        ("onehot", OneHotEncoder(handle_unknown="ignore"))
+    ]
+)
+
+preprocess = ColumnTransformer(
+    transformers=[
+        ("num", numeric_transformer, numeric_features),
+        ("cat", categorical_transformer, categorical_features)
+    ]
+)
+
+# 7. Models
+
+log_reg = LogisticRegression(
+    multi_class="multinomial",
+    max_iter=1000,
+    C=1.0,
+    solver="lbfgs",
+    random_state=RANDOM_STATE
+)
+
+rf_clf = RandomForestClassifier(
+    n_estimators=100,
+    max_depth=8,
+    random_state=RANDOM_STATE,
+    n_jobs=-1
+)
+
+gb_clf = GradientBoostingClassifier(
+    learning_rate=0.05,
+    n_estimators=150,
+    random_state=RANDOM_STATE
+)
+
+models = {
+    "Logistic Regression": log_reg,
+    "Random Forest": rf_clf,
+    "Gradient Boosting": gb_clf
+}
