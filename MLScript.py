@@ -302,3 +302,114 @@ models = {
     "Random Forest": rf_clf,
     "Gradient Boosting": gb_clf
 }
+
+# 8. Training & CV evaluation
+
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
+
+for name, model in models.items():
+    print(f"\n[INFO] Running CV for {name}...")
+    pipe = Pipeline(steps=[("preprocess", preprocess), ("model", model)])
+    acc_scores = cross_val_score(pipe, X_train, y_train, cv=cv, scoring="accuracy")
+    f1_scores = cross_val_score(pipe, X_train, y_train, cv=cv, scoring="f1_macro")
+    print(f"=== {name} ===")
+    print(f"CV Accuracy: {acc_scores.mean():.3f} ± {acc_scores.std():.3f}")
+    print(f"CV Macro F1: {f1_scores.mean():.3f} ± {f1_scores.std():.3f}")
+    models[name] = pipe  # store full pipeline
+
+# 9. Fit on full train & test evaluation
+
+results = {}
+
+for name, pipe in models.items():
+    pipe.fit(X_train, y_train)
+    y_pred = pipe.predict(X_test)
+    y_proba = pipe.predict_proba(X_test)
+
+    acc = accuracy_score(y_test, y_pred)
+    f1 = f1_score(y_test, y_pred, average="macro")
+    cm = confusion_matrix(y_test, y_pred)
+
+    # Brier score (multi‑class: average of per‑class Brier scores)
+    # Convert y_test to one‑hot
+    y_test_oh = np.eye(3)[y_test.values]
+    brier = np.mean(np.sum((y_proba - y_test_oh) ** 2, axis=1))
+
+    results[name] = {
+        "accuracy": acc,
+        "macro_f1": f1,
+        "confusion_matrix": cm,
+        "brier_score": brier,
+    }
+
+    print(f"\n=== {name} TEST RESULTS ===")
+    print(f"Accuracy: {acc:.3f}")
+    print(f"Macro F1: {f1:.3f}")
+    print(f"Brier score: {brier:.3f}")
+    print("Confusion matrix (rows=true, cols=pred; 0=Away,1=Draw,2=Home):")
+    print(cm)
+
+# 10. Basic EDA (home advantage, outcome distribution, correlations)
+
+# Outcome distribution
+outcome_counts = matches_clean["result"].value_counts(normalize=True).sort_index()
+print("\nOutcome distribution (0=Away,1=Draw,2=Home):")
+print(outcome_counts)
+
+# Bar plot
+plt.figure(figsize=(4, 3))
+sns.barplot(x=outcome_counts.index, y=outcome_counts.values)
+plt.xticks([0, 1, 2], ["Away", "Draw", "Home"])
+plt.ylabel("Proportion")
+plt.title("Match outcome distribution")
+plt.tight_layout()
+plt.show()
+
+# correlation heatmap of numeric features
+plt.figure(figsize=(12, 10))
+corr = matches_clean[numeric_features + ["home_team_goal", "away_team_goal"]].corr()
+sns.heatmap(corr, cmap="coolwarm", center=0)
+plt.title("Correlation heatmap (numeric features & goals)")
+plt.tight_layout()
+plt.show()
+
+# 11. Feature importance (RF & GBM)
+
+def get_feature_names(preprocessor, numeric_features, categorical_features):
+    """
+    Get transformed feature names from ColumnTransformer.
+    """
+    num_features_out = numeric_features
+    cat_transformer = preprocessor.named_transformers_["cat"]["onehot"]
+    cat_features_out = list(cat_transformer.get_feature_names_out(categorical_features))
+    return num_features_out + cat_features_out
+
+# Random Forest feature importance
+rf_pipe = models["Random Forest"]
+rf_model = rf_pipe.named_steps["model"]
+feature_names = get_feature_names(rf_pipe.named_steps["preprocess"], numeric_features, categorical_features)
+
+rf_importances = pd.Series(rf_model.feature_importances_, index=feature_names).sort_values(ascending=False)
+print("\nTop 15 RF feature importances:")
+print(rf_importances.head(15))
+
+plt.figure(figsize=(8, 5))
+rf_importances.head(15).plot(kind="barh")
+plt.gca().invert_yaxis()
+plt.title("Random Forest Top 15 Feature Importances")
+plt.tight_layout()
+plt.show()
+
+# Gradient Boosting feature importance
+gb_pipe = models["Gradient Boosting"]
+gb_model = gb_pipe.named_steps["model"]
+gb_importances = pd.Series(gb_model.feature_importances_, index=feature_names).sort_values(ascending=False)
+print("\nTop 15 GB feature importances:")
+print(gb_importances.head(15))
+
+plt.figure(figsize=(8, 5))
+gb_importances.head(15).plot(kind="barh")
+plt.gca().invert_yaxis()
+plt.title("Gradient Boosting Top 15 Feature Importances")
+plt.tight_layout()
+plt.show()
